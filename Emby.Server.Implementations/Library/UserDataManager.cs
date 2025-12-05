@@ -15,6 +15,7 @@ using MediaBrowser.Controller.Library;
 using MediaBrowser.Model.Dto;
 using MediaBrowser.Model.Entities;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using AudioBook = MediaBrowser.Controller.Entities.AudioBook;
 using Book = MediaBrowser.Controller.Entities.Book;
 
@@ -29,17 +30,22 @@ namespace Emby.Server.Implementations.Library
         private readonly IDbContextFactory<JellyfinDbContext> _repository;
         private readonly FastConcurrentLru<string, UserItemData> _cache;
 
+        private readonly ILogger<UserDataManager> _logger;
+
         /// <summary>
         /// Initializes a new instance of the <see cref="UserDataManager"/> class.
         /// </summary>
         /// <param name="config">Instance of the <see cref="IServerConfigurationManager"/> interface.</param>
         /// <param name="repository">Instance of the <see cref="IDbContextFactory{JellyfinDbContext}"/> interface.</param>
+        /// <param name="logger">Logger.</param>
         public UserDataManager(
             IServerConfigurationManager config,
-            IDbContextFactory<JellyfinDbContext> repository)
+            IDbContextFactory<JellyfinDbContext> repository,
+            ILogger<UserDataManager> logger)
         {
             _config = config;
             _repository = repository;
+            _logger = logger;
             _cache = new FastConcurrentLru<string, UserItemData>(Environment.ProcessorCount, _config.Configuration.CacheSize, StringComparer.OrdinalIgnoreCase);
         }
 
@@ -56,6 +62,12 @@ namespace Emby.Server.Implementations.Library
             cancellationToken.ThrowIfCancellationRequested();
 
             var keys = item.GetUserDataKeys();
+
+            _logger.LogError(
+                "Saving user data for item {ItemId} ({ItemType}), keys: {Keys}",
+                item.Id,
+                item.GetType().Name,
+                string.Join(", ", keys));
 
             using var dbContext = _repository.CreateDbContext();
             using var transaction = dbContext.Database.BeginTransaction();
@@ -211,7 +223,7 @@ namespace Emby.Server.Implementations.Library
 
             if (userData.Length > 0)
             {
-                var directDataReference = userData.FirstOrDefault(e => e.CustomDataKey == itemId.ToString("N"));
+                var directDataReference = userData.FirstOrDefault(e => e.CustomDataKey == itemId.ToString());
                 if (directDataReference is not null)
                 {
                     return Map(directDataReference);

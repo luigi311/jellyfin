@@ -630,6 +630,13 @@ public sealed class BaseItemRepository
             var userdataKey = item.GetUserDataKeys();
             var inheritedTags = item.GetInheritedTags();
 
+            // log what keys this item will use
+            _logger.LogError(
+                "UpdateOrInsert for item {ItemId} ({ItemType}), keys: {Keys}",
+                item.Id,
+                item.GetType().Name,
+                string.Join(", ", userdataKey));
+
             tuples.Add((item, ancestorIds, topParent, userdataKey, inheritedTags));
         }
 
@@ -652,7 +659,6 @@ public sealed class BaseItemRepository
             }
             else
             {
-                _logger.LogError("Updating existing item {ItemId} - this may take some time.", entity.Id);
                 context.BaseItemProviders.Where(e => e.ItemId == entity.Id).ExecuteDelete();
                 context.BaseItemImageInfos.Where(e => e.ItemId == entity.Id).ExecuteDelete();
                 context.BaseItemMetadataFields.Where(e => e.ItemId == entity.Id).ExecuteDelete();
@@ -677,6 +683,12 @@ public sealed class BaseItemRepository
         {
             // reattach old userData entries
             var userKeys = item.UserDataKey.ToArray();
+
+            _logger.LogError(
+                "Reattaching user data for item {ItemId} using keys: {Keys}",
+                item.Item.Id,
+                string.Join(", ", userKeys));
+
             var retentionDate = (DateTime?)null;
             context.UserData
                 .Where(e => e.ItemId == PlaceholderId)
