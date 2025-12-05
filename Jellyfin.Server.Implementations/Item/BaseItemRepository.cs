@@ -652,6 +652,7 @@ public sealed class BaseItemRepository
             }
             else
             {
+                _logger.LogError("Updating existing item {ItemId} - this may take some time.", entity.Id);
                 context.BaseItemProviders.Where(e => e.ItemId == entity.Id).ExecuteDelete();
                 context.BaseItemImageInfos.Where(e => e.ItemId == entity.Id).ExecuteDelete();
                 context.BaseItemMetadataFields.Where(e => e.ItemId == entity.Id).ExecuteDelete();
