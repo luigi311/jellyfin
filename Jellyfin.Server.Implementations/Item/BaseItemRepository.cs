@@ -135,6 +135,18 @@ public sealed class BaseItemRepository
             .Where(e => e.ItemId == PlaceholderId)
             .ExecuteDeleteAsync(cancellationToken).ConfigureAwait(false);
 
+        var originalKeys = await context.UserData
+            .WhereOneOrMany(relatedItems, e => e.ItemId)
+            .Select(e => new { e.ItemId, e.CustomDataKey })
+            .ToListAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        _logger.LogInformation(
+            "Detaching user data for items {ItemIds}. Found {RowCount} user data rows with keys: {Keys}",
+            string.Join(", ", relatedItems),
+            originalKeys.Count,
+            string.Join(", ", originalKeys.Select(x => x.CustomDataKey ?? "<null>")));
+
         // Detach all user watch data
         await context.UserData
             .WhereOneOrMany(relatedItems, e => e.ItemId)
@@ -681,21 +693,24 @@ public sealed class BaseItemRepository
 
         foreach (var item in newItems)
         {
-            // reattach old userData entries
             var userKeys = item.UserDataKey.ToArray();
-
-            _logger.LogError(
-                "Reattaching user data for item {ItemId} using keys: {Keys}",
-                item.Item.Id,
-                string.Join(", ", userKeys));
-
             var retentionDate = (DateTime?)null;
-            context.UserData
+
+            var updatedCount = context.UserData
                 .Where(e => e.ItemId == PlaceholderId)
                 .Where(e => userKeys.Contains(e.CustomDataKey))
                 .ExecuteUpdate(e => e
                     .SetProperty(f => f.ItemId, item.Item.Id)
                     .SetProperty(f => f.RetentionDate, retentionDate));
+
+            if (updatedCount > 0)
+            {
+                _logger.LogError(
+                    "Reattaching user data for item {ItemId}: matching placeholder rows = {Count}, keys = \"{Keys}\"",
+                    item.Item.Id,
+                    updatedCount,
+                    string.Join(", ", userKeys));
+            }
         }
 
         var itemValueMaps = tuples
