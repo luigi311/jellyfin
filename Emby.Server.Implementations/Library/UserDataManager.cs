@@ -53,11 +53,16 @@ namespace Emby.Server.Implementations.Library
         public event EventHandler<UserDataSaveEventArgs>? UserDataSaved;
 
         /// <inheritdoc />
-        public void SaveUserData(User user, BaseItem item, UserItemData userData, UserDataSaveReason reason, CancellationToken cancellationToken)
+        public void SaveUserData(
+            User user,
+            BaseItem item,
+            UserItemData userData,
+            UserDataSaveReason reason,
+            CancellationToken cancellationToken)
         {
-            ArgumentNullException.ThrowIfNull(userData);
-
+            ArgumentNullException.ThrowIfNull(user);
             ArgumentNullException.ThrowIfNull(item);
+            ArgumentNullException.ThrowIfNull(userData);
 
             cancellationToken.ThrowIfCancellationRequested();
 
@@ -72,34 +77,82 @@ namespace Emby.Server.Implementations.Library
             using var dbContext = _repository.CreateDbContext();
             using var transaction = dbContext.Database.BeginTransaction();
 
+            var userId = user.Id;
+            var itemId = item.Id;
+
+            // Load all existing rows for this user+item (any key).
+            var existingRows = dbContext.UserData
+                .Where(e => e.UserId == userId && e.ItemId == itemId)
+                .ToList();
+
             foreach (var key in keys)
             {
-                userData.Key = key;
-                var userDataEntry = Map(userData, user.Id, item.Id);
-                if (dbContext.UserData.Any(f => f.ItemId == userDataEntry.ItemId && f.UserId == userDataEntry.UserId && f.CustomDataKey == userDataEntry.CustomDataKey))
+                // Find existing row for this key, if any.
+                var row = existingRows.FirstOrDefault(x => x.CustomDataKey == key);
+
+                if (row is null)
                 {
-                    dbContext.UserData.Attach(userDataEntry).State = EntityState.Modified;
+                    // Create new row via Map so all required members are set.
+                    userData.Key = key;
+                    row = Map(userData, userId, itemId);
+                    dbContext.UserData.Add(row);
                 }
                 else
                 {
-                    dbContext.UserData.Add(userDataEntry);
+                    // Update existing row fields from current userData.
+                    row.AudioStreamIndex = userData.AudioStreamIndex;
+                    row.SubtitleStreamIndex = userData.SubtitleStreamIndex;
+                    row.IsFavorite = userData.IsFavorite;
+                    row.LastPlayedDate = userData.LastPlayedDate;
+                    row.Likes = userData.Likes;
+                    row.PlaybackPositionTicks = userData.PlaybackPositionTicks;
+                    row.PlayCount = userData.PlayCount;
+                    row.Played = userData.Played;
+                    row.Rating = userData.Rating;
                 }
+            }
+
+            // clean up rows whose keys are no longer valid for this item.
+            var validKeySet = keys.ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var obsoleteRows = existingRows.Where(e => !validKeySet.Contains(e.CustomDataKey)).ToList();
+            if (obsoleteRows.Count != 0)
+            {
+                dbContext.UserData.RemoveRange(obsoleteRows);
             }
 
             dbContext.SaveChanges();
             transaction.Commit();
 
-            var userId = user.InternalId;
-            var cacheKey = GetCacheKey(userId, item.Id);
-            _cache.AddOrUpdate(cacheKey, userData);
-            item.UserData = dbContext.UserData.Where(e => e.ItemId == item.Id).AsNoTracking().ToArray(); // rehydrate the cached userdata
+            // Cache: store one canonical UserItemData (key = first key is fine).
+            var cacheKey = GetCacheKey(user.InternalId, itemId);
+            var cachedUserData = new UserItemData
+            {
+                Key = keys[0],
+                AudioStreamIndex = userData.AudioStreamIndex,
+                SubtitleStreamIndex = userData.SubtitleStreamIndex,
+                IsFavorite = userData.IsFavorite,
+                LastPlayedDate = userData.LastPlayedDate,
+                Likes = userData.Likes,
+                PlaybackPositionTicks = userData.PlaybackPositionTicks,
+                PlayCount = userData.PlayCount,
+                Played = userData.Played,
+                Rating = userData.Rating
+            };
+
+            _cache.AddOrUpdate(cacheKey, cachedUserData);
+
+            // Rehydrate item's UserData from DB so subsequent calls see everything.
+            item.UserData = dbContext.UserData
+                .Where(e => e.ItemId == itemId)
+                .AsNoTracking()
+                .ToArray();
 
             UserDataSaved?.Invoke(this, new UserDataSaveEventArgs
             {
                 Keys = keys,
-                UserData = userData,
+                UserData = cachedUserData,
                 SaveReason = reason,
-                UserId = user.Id,
+                UserId = userId,
                 Item = item
             });
         }

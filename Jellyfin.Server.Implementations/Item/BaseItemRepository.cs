@@ -147,7 +147,10 @@ public sealed class BaseItemRepository
             originalKeys.Count,
             string.Join(", ", originalKeys.Select(x => x.CustomDataKey ?? "<null>")));
 
-        // Detach all user watch data
+        // Detach all user data:
+        // - Keep playback progress / flags / rating etc.
+        // - Mark with RetentionDate.
+        // - Move to PlaceholderId so they can be reattached later by CustomDataKey + UserId.
         await context.UserData
             .WhereOneOrMany(relatedItems, e => e.ItemId)
             .ExecuteUpdateAsync(
@@ -631,11 +634,15 @@ public sealed class BaseItemRepository
         cancellationToken.ThrowIfCancellationRequested();
 
         var tuples = new List<(BaseItemDto Item, List<Guid>? AncestorIds, BaseItemDto TopParent, IEnumerable<string> UserDataKey, List<string> InheritedTags)>();
-        foreach (var item in items.GroupBy(e => e.Id).Select(e => e.Last()).Where(e => e.Id != PlaceholderId))
+
+        foreach (var item in items
+            .GroupBy(e => e.Id)
+            .Select(e => e.Last())
+            .Where(e => e.Id != PlaceholderId))
         {
-            var ancestorIds = item.SupportsAncestors ?
-                item.GetAncestorIds().Distinct().ToList() :
-                null;
+            var ancestorIds = item.SupportsAncestors
+                ? item.GetAncestorIds().Distinct().ToList()
+                : null;
 
             var topParent = item.GetTopParent();
 
@@ -656,8 +663,15 @@ public sealed class BaseItemRepository
         using var transaction = context.Database.BeginTransaction();
 
         var ids = tuples.Select(f => f.Item.Id).ToArray();
-        var existingItems = context.BaseItems.Where(e => ids.Contains(e.Id)).Select(f => f.Id).ToArray();
-        var newItems = tuples.Where(e => !existingItems.Contains(e.Item.Id)).ToArray();
+
+        var existingItems = context.BaseItems
+            .Where(e => ids.Contains(e.Id))
+            .Select(f => f.Id)
+            .ToArray();
+
+        var newItems = tuples
+            .Where(e => !existingItems.Contains(e.Item.Id))
+            .ToArray();
 
         foreach (var item in tuples)
         {
@@ -694,6 +708,12 @@ public sealed class BaseItemRepository
         foreach (var item in newItems)
         {
             var userKeys = item.UserDataKey.ToArray();
+
+            if (userKeys.Length == 0)
+            {
+                continue;
+            }
+
             var retentionDate = (DateTime?)null;
 
             var updatedCount = context.UserData
@@ -703,23 +723,22 @@ public sealed class BaseItemRepository
                     .SetProperty(f => f.ItemId, item.Item.Id)
                     .SetProperty(f => f.RetentionDate, retentionDate));
 
-            if (updatedCount > 0)
-            {
-                _logger.LogError(
-                    "Reattaching user data for item {ItemId}: matching placeholder rows = {Count}, keys = \"{Keys}\"",
-                    item.Item.Id,
-                    updatedCount,
-                    string.Join(", ", userKeys));
-            }
+            _logger.LogInformation(
+                "Reattaching user data for item {ItemId}: matching placeholder rows = {Count}, keys = \"{Keys}\"",
+                item.Item.Id,
+                updatedCount,
+                string.Join(", ", userKeys));
         }
 
         var itemValueMaps = tuples
             .Select(e => (e.Item, Values: GetItemValuesToSave(e.Item, e.InheritedTags)))
             .ToArray();
+
         var allListedItemValues = itemValueMaps
             .SelectMany(f => f.Values)
             .Distinct()
             .ToArray();
+
         var existingValues = context.ItemValues
             .Select(e => new
             {
@@ -729,19 +748,27 @@ public sealed class BaseItemRepository
             .Where(f => allListedItemValues.Select(e => $"{(int)e.MagicNumber}+{e.Value}").Contains(f.Key))
             .Select(e => e.item)
             .ToArray();
-        var missingItemValues = allListedItemValues.Except(existingValues.Select(f => (MagicNumber: f.Type, f.Value))).Select(f => new ItemValue()
-        {
-            CleanValue = GetCleanValue(f.Value),
-            ItemValueId = Guid.NewGuid(),
-            Type = f.MagicNumber,
-            Value = f.Value
-        }).ToArray();
+
+        var missingItemValues = allListedItemValues
+            .Except(existingValues.Select(f => (MagicNumber: f.Type, f.Value)))
+            .Select(f => new ItemValue
+            {
+                CleanValue = GetCleanValue(f.Value),
+                ItemValueId = Guid.NewGuid(),
+                Type = f.MagicNumber,
+                Value = f.Value
+            })
+            .ToArray();
+
         context.ItemValues.AddRange(missingItemValues);
         context.SaveChanges();
 
         var itemValuesStore = existingValues.Concat(missingItemValues).ToArray();
         var valueMap = itemValueMaps
-            .Select(f => (f.Item, Values: f.Values.Select(e => itemValuesStore.First(g => g.Value == e.Value && g.Type == e.MagicNumber)).DistinctBy(e => e.ItemValueId).ToArray()))
+            .Select(f => (f.Item, Values: f.Values
+                .Select(e => itemValuesStore.First(g => g.Value == e.Value && g.Type == e.MagicNumber))
+                .DistinctBy(e => e.ItemValueId)
+                .ToArray()))
             .ToArray();
 
         var mappedValues = context.ItemValuesMap.Where(e => ids.Contains(e.ItemId)).ToList();
@@ -754,7 +781,7 @@ public sealed class BaseItemRepository
                 var existingItem = itemMappedValues.FirstOrDefault(f => f.ItemValueId == itemValue.ItemValueId);
                 if (existingItem is null)
                 {
-                    context.ItemValuesMap.Add(new ItemValueMap()
+                    context.ItemValuesMap.Add(new ItemValueMap
                     {
                         Item = null!,
                         ItemId = item.Item.Id,
@@ -780,13 +807,17 @@ public sealed class BaseItemRepository
             if (item.Item.SupportsAncestors && item.AncestorIds != null)
             {
                 var existingAncestorIds = context.AncestorIds.Where(e => e.ItemId == item.Item.Id).ToList();
-                var validAncestorIds = context.BaseItems.Where(e => item.AncestorIds.Contains(e.Id)).Select(f => f.Id).ToArray();
+                var validAncestorIds = context.BaseItems
+                    .Where(e => item.AncestorIds.Contains(e.Id))
+                    .Select(f => f.Id)
+                    .ToArray();
+
                 foreach (var ancestorId in validAncestorIds)
                 {
                     var existingAncestorId = existingAncestorIds.FirstOrDefault(e => e.ParentItemId == ancestorId);
                     if (existingAncestorId is null)
                     {
-                        context.AncestorIds.Add(new AncestorId()
+                        context.AncestorIds.Add(new AncestorId
                         {
                             ParentItemId = ancestorId,
                             ItemId = item.Item.Id,
